@@ -1,4 +1,3 @@
-# recv_imu_csv.py (Hotspot, con block_seq, relleno de pérdidas y sesiones de 10 s)
 import socket, struct, time, os, csv
 from datetime import datetime
 
@@ -105,7 +104,7 @@ def verificar_cambio_sesion():
 def decodificar_carga(payload):
     """
     Convierte el bloque de 1024 bytes en lista de 85 tuplas (ax,ay,az,gx,gy,gz).
-    Cada muestra: 12 bytes = 6 * int16 (big-endian). Los últimos 4 bytes son footer.
+    Cada muestra 12 bytes = 6*int16 (big-endian) últimos 4 bytes son footer.
     """
     muestras = []
     util = len(payload) - 4
@@ -119,7 +118,7 @@ def decodificar_carga(payload):
 
 
 def escribir_filas_bloque(id_disp, secuencia_bloque, muestras):
-    """Escribe 85 filas para un bloque recibido (usa datos reales)."""
+    """Escribe 85 filas para un bloque"""
     escritor = escritores[id_disp]
     for tupla in muestras:
         escritor.writerow([secuencia_bloque, *tupla])
@@ -127,7 +126,7 @@ def escribir_filas_bloque(id_disp, secuencia_bloque, muestras):
 
 
 def escribir_bloque_ceros(id_disp, secuencia_bloque):
-    """Escribe 85 filas en cero para un bloque perdido."""
+    """Escribe 85 filas en cero para un bloque perdido"""
     escritor = escritores[id_disp]
     fila_cero = [0, 0, 0, 0, 0, 0]  # ax..gz = 0
     for _ in range(MUESTRAS_POR_BLOQUE):
@@ -136,7 +135,7 @@ def escribir_bloque_ceros(id_disp, secuencia_bloque):
 
 
 def vaciar_si_corresponde(id_disp):
-    """Flush periódico para asegurar persistencia."""
+    """Flush periódico para asegurar persistencia"""
     if (paquetes[id_disp] % 100) == 0:
         archivos[id_disp].flush()
 
@@ -152,7 +151,7 @@ tiempo_ultimo_reporte = time.time()
 
 try:
     while True:
-        # Cada iteración revisamos si hay que cambiar de sesión
+        # Cada iteración se revisasi hay que cambiar de sesión
         verificar_cambio_sesion()
 
         try:
@@ -171,7 +170,7 @@ try:
                 tiempo_ultimo_reporte = ahora
             continue
 
-        # Chequeo mínimo de tamaño (header)
+        # Chequeo  de tamaño delheader
         if len(datos) < TAMANO_CABECERA:
             continue
 
@@ -190,7 +189,7 @@ try:
         if id_disp not in archivos:
             abrir_csv_para(id_disp)
 
-        # Detectar reset de secuencia (p. ej., reinicio del ESP32).
+        # Detectar reset de secuencia 
         if ultima_seq[id_disp] is not None and seq < ultima_seq[id_disp]:
             print(
                 f"[!] id{id_disp}: secuencia reiniciada "
@@ -199,7 +198,7 @@ try:
             )
             ultima_seq[id_disp] = None
 
-        # Si hay huecos, rellenar con bloques de ceros (uno por seq faltante)
+        #si hay huecos rellenar con bloques de ceros (uno por seq faltante)
         if ultima_seq[id_disp] is not None and seq > (ultima_seq[id_disp] + 1):
             faltantes = seq - ultima_seq[id_disp] - 1
             perdidas[id_disp] += faltantes
