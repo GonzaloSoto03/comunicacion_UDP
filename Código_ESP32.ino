@@ -5,253 +5,179 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
-// nodo
-#define ID_DISPOSITIVO   3   // usa 1,2,3,4 según brazo/pierna
+#define DEVICE_ID   4   
 
-#define PIN_LED        13
-#define PIN_I2C_SDA    21
-#define PIN_I2C_SCL    22
-#define MPU_DIRECCION  0x69
+#define PIN_LED     13
+#define I2C_SDA     21
+#define I2C_SCL     22
+#define MPU_ADDR    0x69
 
+const char* WIFI_SSID = "redcompu";     
+const char* WIFI_PASS = "cocoso99";    
 
-const char* WIFI_SSID  = "redcompu";   
-const char* WIFI_CLAVE = "abcdefg";   
+IPAddress DEST_IP(192,168,137,1);
+const uint16_t DEST_PORT = 50000;
 
-IPAddress IP_DESTINO(192,168,137,1);
-const uint16_t PUERTO_DESTINO = 50000;
+const uint16_t TAM_BLOQUE      = 256;
+const uint8_t  MUESTRAS_BLOQUE = 21;   
 
-const uint16_t TAMANO_BLOQUE       = 1024;
-const uint8_t  MUESTRAS_POR_BLOQUE = 85;   // 85*(6*2)=1020 + 4 footer
+#define NUM_BUFS 12  
+static uint8_t buffers[NUM_BUFS][TAM_BLOQUE];
+static QueueHandle_t qVacios;  
+static QueueHandle_t qLlenos;  
 
-#define NUMERO_BUFFERS 12  // más margen para evitar drops con Wi-Fi
-static uint8_t buffers[NUMERO_BUFFERS][TAMANO_BLOQUE];
-static QueueHandle_t colaBuffersVacios;  // índices disponibles
-static QueueHandle_t colaBuffersLlenos;  // índices llenos para envío
-
-//Tareas
-TaskHandle_t tareaAdquisicionHandle;
-TaskHandle_t tareaRedHandle;
+TaskHandle_t tAdq;
+TaskHandle_t tNet;
 WiFiUDP udp;
 
-//Cabecera UDP 20 bytes
-struct __attribute__((packed)) CabeceraUDP {
-  uint8_t  marcaMagica[4]; // "IMU2"
-  uint8_t  version;        // 1
-  uint8_t  idDispositivo;  // 1 2 3 4
-  uint16_t reservado;      // 0
-  uint32_t secuencia;      // contador
-  uint32_t milisegundos;   // millis()
-  uint32_t longitud;       // 1024
+struct __attribute__((packed)) UdpHdr {
+  uint8_t  magic[4];
+  uint8_t  ver;
+  uint8_t  dev_id;
+  uint16_t rsv;
+  uint32_t seq;
+  uint32_t ms;
+  uint32_t len;
 };
+volatile uint32_t g_seq = 0;
 
-volatile uint32_t contadorSecuencia = 0;
-
-//Prototipos
-void tareaAdquisicion(void* parametro);
-void tareaRed(void* parametro);
-bool leerIMU(int16_t* datos);
-void iniciarIMU();
-void configurarIMU();
-void escribirRegistro(uint8_t registro, uint8_t valor);
-void llenarBloque(uint8_t* buffer);
-
-inline void encenderLED(bool encendido) {
-  digitalWrite(PIN_LED, encendido ? HIGH : LOW);
-}
-
-inline void parpadearLED(uint16_t tiempoMs) {
-  digitalWrite(PIN_LED, HIGH);
-  delay(tiempoMs);
-  digitalWrite(PIN_LED, LOW);
-  delay(tiempoMs);
-}
+void taskAdquisicion(void* pv);
+void taskNetwork(void* pv);
+bool leerMPU(int16_t* d);
+void iniciarMPU();
+void configurarMPU();
+void wr(uint8_t r, uint8_t v);
+void llenarBloque(uint8_t* buf);
+inline void ledOn(bool on){ digitalWrite(PIN_LED, on?HIGH:LOW); }
+inline void ledBlink(uint16_t t){ digitalWrite(PIN_LED,HIGH); delay(t); digitalWrite(PIN_LED,LOW); delay(t); }
 
 void setup() {
   pinMode(PIN_LED, OUTPUT);
-  encenderLED(false);
+  ledOn(false);
 
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(200000);
   Wire.setTimeout(50);
-  iniciarIMU();
-  configurarIMU();
+  iniciarMPU();
+  configurarMPU();
 
-  //Colas de indicess
-  colaBuffersVacios = xQueueCreate(NUMERO_BUFFERS, sizeof(uint8_t));
-  colaBuffersLlenos = xQueueCreate(NUMERO_BUFFERS, sizeof(uint8_t));
-  for (uint8_t i = 0; i < NUMERO_BUFFERS; i++) {
-    xQueueSend(colaBuffersVacios, &i, 0);
-  }
+  qVacios = xQueueCreate(NUM_BUFS, sizeof(uint8_t));
+  qLlenos = xQueueCreate(NUM_BUFS, sizeof(uint8_t));
+  for (uint8_t i=0;i<NUM_BUFS;i++) xQueueSend(qVacios, &i, 0);
 
-  //desactivar ahorro de energía para estabilidad
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_CLAVE);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < 10000) {
-    parpadearLED(80);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    udp.begin(0);
-    encenderLED(true);
-  } else {
-    encenderLED(false);
-  }
+  while (WiFi.status() != WL_CONNECTED && (millis()-t0) < 10000) { ledBlink(80); }
+  if (WiFi.status() == WL_CONNECTED) { udp.begin(0); ledOn(true); } else { ledOn(false); }
 
-  // Tareas en cores distintos
-  xTaskCreatePinnedToCore(tareaAdquisicion, "ADQ", 4096, NULL, 3, &tareaAdquisicionHandle, 0);
-  xTaskCreatePinnedToCore(tareaRed,          "RED", 4096, NULL, 2, &tareaRedHandle,          1);
+  xTaskCreatePinnedToCore(taskAdquisicion, "ADQ", 4096, NULL, 3, &tAdq, 0);
+  xTaskCreatePinnedToCore(taskNetwork,     "NET", 4096, NULL, 2, &tNet, 1);
 }
 
 void loop() {
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
-//Adquisición en Core 0
-void tareaAdquisicion(void* parametro) {
-  uint8_t indiceBuffer;
-  TickType_t marcaTiempo = xTaskGetTickCount();
-
+void taskAdquisicion(void* pv) {
+  uint8_t idx;
+  TickType_t tick = xTaskGetTickCount();
   for (;;) {
-    if (xQueueReceive(colaBuffersVacios, &indiceBuffer, portMAX_DELAY) == pdTRUE) {
-      llenarBloque(buffers[indiceBuffer]);
-      xQueueSend(colaBuffersLlenos, &indiceBuffer, portMAX_DELAY);
+    if (xQueueReceive(qVacios, &idx, portMAX_DELAY) == pdTRUE) {
+      llenarBloque(buffers[idx]);
+      xQueueSend(qLlenos, &idx, portMAX_DELAY);
     }
-    vTaskDelayUntil(&marcaTiempo, pdMS_TO_TICKS(1));
+    vTaskDelayUntil(&tick, pdMS_TO_TICKS(1));
   }
 }
 
-// Red en Core 1
-void tareaRed(void* parametro) {
-  CabeceraUDP cabecera;
-  cabecera.marcaMagica[0] = 'I';
-  cabecera.marcaMagica[1] = 'M';
-  cabecera.marcaMagica[2] = 'U';
-  cabecera.marcaMagica[3] = '2';
-  cabecera.version       = 1;
-  cabecera.idDispositivo = ID_DISPOSITIVO;
-  cabecera.reservado     = 0;
-  cabecera.longitud      = TAMANO_BLOQUE;
+void taskNetwork(void* pv) {
+  UdpHdr hdr;
+  hdr.magic[0]='I'; hdr.magic[1]='M'; hdr.magic[2]='U'; hdr.magic[3]='2';
+  hdr.ver=1; hdr.dev_id=DEVICE_ID; hdr.rsv=0; hdr.len=TAM_BLOQUE;
 
-  uint8_t indiceBuffer;
+  uint8_t idx;
   for (;;) {
-    if (xQueueReceive(colaBuffersLlenos, &indiceBuffer, portMAX_DELAY) == pdTRUE) {
-
-      // Reintento de conexión WiFi al hostpot si se pierde
+    if (xQueueReceive(qLlenos, &idx, portMAX_DELAY) == pdTRUE) {
       if (WiFi.status() != WL_CONNECTED) {
-        WiFi.disconnect();
-        WiFi.begin(WIFI_SSID, WIFI_CLAVE);
+        WiFi.disconnect(); WiFi.begin(WIFI_SSID, WIFI_PASS);
         vTaskDelay(pdMS_TO_TICKS(100));
-
         if (WiFi.status() != WL_CONNECTED) {
-          xQueueSend(colaBuffersVacios, &indiceBuffer, portMAX_DELAY);
-          encenderLED(false);
+          xQueueSend(qVacios, &idx, portMAX_DELAY);
+          ledOn(false);
           continue;
         } else {
           udp.begin(0);
-          encenderLED(true);
+          ledOn(true);
         }
       }
+      hdr.seq = g_seq++;
+      hdr.ms  = millis();
 
-      cabecera.secuencia    = contadorSecuencia++;
-      cabecera.milisegundos = millis();
+      udp.beginPacket(DEST_IP, DEST_PORT);
+      udp.write((uint8_t*)&hdr, sizeof(hdr));
+      udp.write(buffers[idx], TAM_BLOQUE);
+      bool ok = udp.endPacket();
 
-      udp.beginPacket(IP_DESTINO, PUERTO_DESTINO);
-      udp.write((uint8_t*)&cabecera, sizeof(cabecera));
-      udp.write(buffers[indiceBuffer], TAMANO_BLOQUE);
-      bool envioCorrecto = udp.endPacket();
-
-      xQueueSend(colaBuffersVacios, &indiceBuffer, portMAX_DELAY);
-
-      if (!envioCorrecto) {
-        parpadearLED(40);
-      }
+      xQueueSend(qVacios, &idx, portMAX_DELAY);
+      if (!ok) { ledBlink(40); }
     }
   }
 }
 
-// Rellenar un bloque de 1024 bytes
-void llenarBloque(uint8_t* buffer) {
-  uint16_t k = 0;
-
-  for (uint8_t muestra = 0; muestra < MUESTRAS_POR_BLOQUE; muestra++) {
-    int16_t datos[6];
-    bool lecturaCorrecta = false;
-
-    // 2 reintentos max de lectura de la IMU
-    for (uint8_t reintento = 0; reintento < 2 && !lecturaCorrecta; reintento++) {
-      lecturaCorrecta = leerIMU(datos);
-      if (!lecturaCorrecta) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-      }
+void llenarBloque(uint8_t* buf) {
+  uint16_t k=0;
+  for (uint8_t s=0; s<MUESTRAS_BLOQUE; s++) {
+    int16_t d[6];
+    bool ok=false;
+    for (uint8_t r=0;r<2 && !ok;r++){
+      ok=leerMPU(d);
+      if(!ok) vTaskDelay(pdMS_TO_TICKS(1));
     }
-
-    if (!lecturaCorrecta) {
-      // Si falla se llena la muestra con ceros
-      for (uint8_t i = 0; i < 6; i++) {
-        buffer[k++] = 0;
-        buffer[k++] = 0;
+    if (!ok) {
+      for (uint8_t i=0;i<6;i++){
+        buf[k++]=0;
+        buf[k++]=0;
       }
     } else {
-      // Datos válidpos se escribe en big-endian
-      for (uint8_t i = 0; i < 6; i++) {
-        buffer[k++] = (uint8_t)(datos[i] >> 8);
-        buffer[k++] = (uint8_t)(datos[i] & 0xFF);
+      for (uint8_t i=0;i<6;i++){
+        buf[k++]=(uint8_t)(d[i]>>8);
+        buf[k++]=(uint8_t)(d[i]&0xFF);
       }
     }
-
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(pdMS_TO_TICKS(4));
   }
-
-  // Footer
-  buffer[1020] = 0;
-  buffer[1021] = 0;
-  buffer[1022] = 0;
-  buffer[1023] = 0;
+  buf[252]=0; buf[253]=0; buf[254]=0; buf[255]=0;
 }
 
-bool leerIMU(int16_t* datos) {
-  Wire.beginTransmission(MPU_DIRECCION);
+bool leerMPU(int16_t* d){
+  Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B);
-  if (Wire.endTransmission(false) != 0) return false;
-
-  if (Wire.requestFrom((int)MPU_DIRECCION, 14, (int)true) < 14) return false;
-
-  // Acelerómetro 3 ejes
-  for (uint8_t i = 0; i < 3; i++) {
-    datos[i] = (Wire.read() << 8) | Wire.read();
-  }
-
-  // Temperatura se descarta
-  Wire.read();
-  Wire.read();
-
-  // Giroscopio 3 ejes
-  for (uint8_t i = 3; i < 6; i++) {
-    datos[i] = (Wire.read() << 8) | Wire.read();
-  }
-
+  if (Wire.endTransmission(false)!=0) return false;
+  if (Wire.requestFrom((int)MPU_ADDR, 14, (int)true) < 14) return false;
+  for (uint8_t i=0;i<3;i++) d[i]=(Wire.read()<<8)|Wire.read();
+  Wire.read(); Wire.read();
+  for (uint8_t i=3;i<6;i++) d[i]=(Wire.read()<<8)|Wire.read();
   return true;
 }
-
-void iniciarIMU() {
-  Wire.beginTransmission(MPU_DIRECCION);
-  Wire.write(0x6B);   // PWR_MGMT_1
-  Wire.write(0x00);   // despertar
+void iniciarMPU(){
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0x00);
   Wire.endTransmission();
   vTaskDelay(pdMS_TO_TICKS(5));
 }
-
-void configurarIMU() {
-  // Configuracion rango giroscopio y acelerometro
-  escribirRegistro(0x1B, 0x08); // ±500 dps
-  escribirRegistro(0x1C, 0x10); // ±8 g
-  // escribirRegistro(0x1A, 0x03); // filtro DLPF
+void configurarMPU(){
+  wr(0x1B,0x08);
+  wr(0x1C,0x10);
+  wr(0x19, 0x03); 
+  wr(0x1A, 0x03);
+  wr(0x1D, 0x03);
 }
-
-void escribirRegistro(uint8_t registro, uint8_t valor) {
-  Wire.beginTransmission(MPU_DIRECCION);
-  Wire.write(registro);
-  Wire.write(valor);
+void wr(uint8_t r,uint8_t v){
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(r);
+  Wire.write(v);
   Wire.endTransmission();
 }
