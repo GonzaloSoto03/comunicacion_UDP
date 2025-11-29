@@ -1,52 +1,51 @@
 import socket, struct, time, os, csv
 from datetime import datetime
 
-IP_ESCUCHA   = "0.0.0.0"
+IP_ESCUCHA     = "0.0.0.0"
 PUERTO_ESCUCHA = 50000
 
-# Mapea IDs a nombres/carpetas base (sin número)
+
 ID_A_NOMBRE = {
-    1: "brazo_izquierdo",
-    2: "brazo_derecho",
-    3: "pierna_izquierda",
-    4: "pierna_derecha",
+    1: "muslo_derecho",
+    2: "pecho",
+    3: "muslo_izquierdo",
+    4: "cintura",
 }
 
-# Prefijo base para las sesiones
-PREFIJO_SESION   = "imu_capturas"
-DURACION_SESION  = 5.0  # segundos por sesión
 
-# Estado de sesión
-indice_sesion       = 1
+PREFIJO_SESION   = "imu_capturas"
+DURACION_SESION  = 6.0  
+
+
+indice_sesion        = 100
 tiempo_inicio_sesion = time.time()
 
 MARCA_MAGICA      = b"IMU2"
-FORMATO_CABECERA  = "<4s B B H I I I"  # magic(4), ver(1), dev_id(1), rsv(2), seq(u32), ms(u32), len(u32)
+FORMATO_CABECERA  = "<4s B B H I I I"  
 TAMANO_CABECERA   = struct.calcsize(FORMATO_CABECERA)
 
-# Estructuras por dispositivo
-escritores      = {}  # id_disp -> csv.writer
-archivos        = {}  # id_disp -> file object
-ultima_seq      = {}  # id_disp -> última seq recibida
-paquetes        = {}  # id_disp -> paquetes recibidos (contados)
-perdidas        = {}  # id_disp -> paquetes perdidos (estimados por salto en seq)
-filas_escritas  = {}  # id_disp -> filas escritas
 
-MUESTRAS_POR_BLOQUE = 85   #1024 = 85*12+4
+escritores      = {}  
+archivos        = {}  
+ultima_seq      = {}  
+paquetes        = {}  
+perdidas        = {}  
+filas_escritas  = {}  
+
+MUESTRAS_POR_BLOQUE = 21   
 ENCABEZADO_CSV      = ["block_seq", "ax", "ay", "az", "gx", "gy", "gz"]
 
 
 def raiz_sesion_actual():
-    """Nombre de carpeta raíz de la sesión actual,como por ejempl0 imu_capturas1"""
+    """Nombre de carpeta raíz de la sesión actual, como por ejemplo imu_capturas1."""
     return f"{PREFIJO_SESION}{indice_sesion}"
 
 
 def abrir_csv_para(id_disp):
-    """Crea carpeta de sesión mas subcarpeta por dispositivo y abre CSV (append) para el dispositivo."""
-    nombre = ID_A_NOMBRE.get(id_disp, f"id{id_disp}")  # ej: 'brazo_izquierdo'
-    raiz   = raiz_sesion_actual()                      # ej: 'imu_capturas1'
+    """Crea carpeta de sesión más subcarpeta por dispositivo y abre CSV (append) para el dispositivo."""
+    nombre = ID_A_NOMBRE.get(id_disp, f"id{id_disp}")  
+    raiz   = raiz_sesion_actual()                      
 
-    # Subcarpeta y archivo con número de sesión, ej: 'brazo_izquierdo1/brazo_izquierdo1.csv'
     nombre_disp_con_indice = f"{nombre}{indice_sesion}"
     carpeta = os.path.join(raiz, nombre_disp_con_indice)
     os.makedirs(carpeta, exist_ok=True)
@@ -67,7 +66,7 @@ def abrir_csv_para(id_disp):
 
 
 def cerrar_todos_los_archivos():
-    """Cierra todos los CSV abiertos."""
+
     for f in archivos.values():
         try:
             f.close()
@@ -76,7 +75,7 @@ def cerrar_todos_los_archivos():
 
 
 def rotar_sesion():
-    """Cierra archivos, limpia estado y avanza a la siguiente sesión."""
+
     global indice_sesion, tiempo_inicio_sesion
     if archivos:
         print(f"--- Cerrando sesión {indice_sesion} ---")
@@ -95,17 +94,14 @@ def rotar_sesion():
 
 
 def verificar_cambio_sesion():
-    """Verifica si han pasado DURACION_SESION segundos y, de ser así, crea nueva sesión."""
+
     ahora = time.time()
     if ahora - tiempo_inicio_sesion >= DURACION_SESION:
         rotar_sesion()
 
 
 def decodificar_carga(payload):
-    """
-    Convierte el bloque de 1024 bytes en lista de 85 tuplas (ax,ay,az,gx,gy,gz).
-    Cada muestra 12 bytes = 6*int16 (big-endian) últimos 4 bytes son footer.
-    """
+
     muestras = []
     util = len(payload) - 4
     for i in range(0, util, 12):
@@ -118,7 +114,6 @@ def decodificar_carga(payload):
 
 
 def escribir_filas_bloque(id_disp, secuencia_bloque, muestras):
-    """Escribe 85 filas para un bloque"""
     escritor = escritores[id_disp]
     for tupla in muestras:
         escritor.writerow([secuencia_bloque, *tupla])
@@ -126,7 +121,6 @@ def escribir_filas_bloque(id_disp, secuencia_bloque, muestras):
 
 
 def escribir_bloque_ceros(id_disp, secuencia_bloque):
-    """Escribe 85 filas en cero para un bloque perdido"""
     escritor = escritores[id_disp]
     fila_cero = [0, 0, 0, 0, 0, 0]  # ax..gz = 0
     for _ in range(MUESTRAS_POR_BLOQUE):
@@ -135,7 +129,6 @@ def escribir_bloque_ceros(id_disp, secuencia_bloque):
 
 
 def vaciar_si_corresponde(id_disp):
-    """Flush periódico para asegurar persistencia"""
     if (paquetes[id_disp] % 100) == 0:
         archivos[id_disp].flush()
 
@@ -151,13 +144,13 @@ tiempo_ultimo_reporte = time.time()
 
 try:
     while True:
-        # Cada iteración se revisasi hay que cambiar de sesión
+
         verificar_cambio_sesion()
 
         try:
             datos, direccion = socket_udp.recvfrom(4096)
         except socket.timeout:
-            # reporte periódico
+
             ahora = time.time()
             if ahora - tiempo_ultimo_reporte >= 5.0:
                 resumen = " | ".join(
@@ -170,11 +163,11 @@ try:
                 tiempo_ultimo_reporte = ahora
             continue
 
-        # Chequeo  de tamaño delheader
+
         if len(datos) < TAMANO_CABECERA:
             continue
 
-        # Desempaquetar header
+
         marca, ver, id_disp, rsv, seq, ms, longitud = struct.unpack(
             FORMATO_CABECERA, datos[:TAMANO_CABECERA]
         )
@@ -185,11 +178,11 @@ try:
         if len(payload) != longitud:
             continue
 
-        # Asegurar CSV abierto para la sesión actual
+
         if id_disp not in archivos:
             abrir_csv_para(id_disp)
 
-        # Detectar reset de secuencia 
+
         if ultima_seq[id_disp] is not None and seq < ultima_seq[id_disp]:
             print(
                 f"[!] id{id_disp}: secuencia reiniciada "
@@ -198,7 +191,7 @@ try:
             )
             ultima_seq[id_disp] = None
 
-        #si hay huecos rellenar con bloques de ceros (uno por seq faltante)
+
         if ultima_seq[id_disp] is not None and seq > (ultima_seq[id_disp] + 1):
             faltantes = seq - ultima_seq[id_disp] - 1
             perdidas[id_disp] += faltantes
@@ -207,21 +200,21 @@ try:
             for seq_faltante in range(inicio_faltante, fin_faltante + 1):
                 escribir_bloque_ceros(id_disp, seq_faltante)
 
-        # Procesar bloque recibido
+
         muestras = decodificar_carga(payload)
-        # Asegurar 85 filas: si por algún motivo vinieran menos, rellenamos (raro, pero robusto)
+
         if len(muestras) < MUESTRAS_POR_BLOQUE:
             faltan = MUESTRAS_POR_BLOQUE - len(muestras)
             muestras.extend([(0, 0, 0, 0, 0, 0)] * faltan)
 
         escribir_filas_bloque(id_disp, seq, muestras)
 
-        # Actualizar contadores
+
         ultima_seq[id_disp] = seq
         paquetes[id_disp]   += 1
         vaciar_si_corresponde(id_disp)
 
-        # Estado cada 256 paquetes
+
         if (paquetes[id_disp] % 256) == 0:
             print(
                 f"id{id_disp} {ID_A_NOMBRE.get(id_disp,'?')} "
