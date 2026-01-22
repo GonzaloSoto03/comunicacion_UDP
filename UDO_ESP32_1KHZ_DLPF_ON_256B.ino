@@ -67,7 +67,7 @@ void setup() {
 
   // I2C
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(200000);
+  Wire.setClock(400000);
   Wire.setTimeout(50);
   iniciarMPU();
   configurarMPU();
