@@ -188,9 +188,11 @@ void iniciarMPU(){
   vTaskDelay(pdMS_TO_TICKS(5));
 }
 void configurarMPU(){
-  wr(0x1B,0x08);
-  wr(0x1C,0x10);
-  /* wr(0x1A,0x03); */
+  wr(0x1B,0x08); // 500 dps, fchoiceb=00 dlpf on
+  wr(0x19, 0x00); //sampler_div=0 se mantiene fs a 1000hz
+  wr(0x1A,0x02) // BANDWIDTH AJUSTADO A 98 HH
+  wr(0x1C,0x10); // ACCEL A +-8G
+  wr(0x1D, 0x02);   // Accel DLPFON, BANDWITDTH 92 Hz, Fs 1 kHz
 }
 void wr(uint8_t r,uint8_t v){
   Wire.beginTransmission(MPU_ADDR);
